@@ -1,0 +1,6 @@
+reportlab
+openpyxl
+pillow
+python-dotenv
+msal
+requests

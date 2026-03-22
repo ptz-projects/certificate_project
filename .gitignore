@@ -1,0 +1,11 @@
+# Never commit these
+attendees.xlsx
+certificates/
+assets/logo.png
+assets/medal.png
+
+# Python
+__pycache__/
+*.pyc
+.env
+venv/
