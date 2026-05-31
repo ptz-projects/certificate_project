@@ -1,97 +1,66 @@
+# Stage 1 — Generate PDF certificates
 """
-send_certificates.py
---------------------
-Stage 2: Email generated PDF certificates to attendees via Microsoft Graph API.
-Uses OAuth2 client credentials flow — works with Security Defaults enabled.
-Run ONLY after generate_certificates.py has completed successfully.
+generate_certificates.py
+------------------------
+Stage 1: Generate branded PDF certificates from Excel attendee list.
+Outputs one PDF per attendee into the /certificates folder.
 
 Requirements:
-    pip install msal requests openpyxl python-dotenv
+    pip install reportlab openpyxl pillow requests
 
-Credentials are loaded from .env file — never hardcoded here.
+Project structure expected:
+    /certificate_project
+        generate_certificates.py
+        send_certificates.py
+        attendees.xlsx
+        assets/
+            logo.png          <-- Add your logo here
+        certificates/         <-- Generated PDFs will appear here
 """
 
 import os
-import base64
 import openpyxl
-import requests
-import msal
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+import urllib.request
+import io
 from dotenv import load_dotenv
 
-# ─────────────────────────────────────────────
-# LOAD CREDENTIALS FROM .env
-# ─────────────────────────────────────────────
 load_dotenv()
 
-TENANT_ID = os.getenv("AZURE_TENANT_ID")
-CLIENT_ID = os.getenv("AZURE_CLIENT_ID")
-CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET")
-SENDER_EMAIL = os.getenv("SENDER_EMAIL")
-BUSINESS_NAME = os.getenv("BUSINESS_NAME")
-
 # ─────────────────────────────────────────────
-# CONFIGURATION
+# CONFIGURATION — Edit these values
 # ─────────────────────────────────────────────
-CERTIFICATES_FOLDER = "certificates"
-EXCEL_FILE = "attendees.xlsx"
-GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
-GRAPH_ENDPOINT = f"https://graph.microsoft.com/v1.0/users/{SENDER_EMAIL}/sendMail"
+BUSINESS_NAME = os.getenv("BUSINESS_NAME")       # Issued by: name on certificate
+BRAND_COLOUR = colors.HexColor("#1A3C5E")     # Replace with your brand hex colour
+ACCENT_COLOUR = colors.HexColor("#C9A84C")    # Replace with your accent/gold colour
+LOGO_PATH = "assets/logo.png"                 # Path to your logo file
+OUTPUT_FOLDER = "certificates"                # Where PDFs are saved
+EXCEL_FILE = "attendees.xlsx"                 # Your attendee list
 
-EMAIL_SUBJECT = "Your Certificate of Completion"
-EMAIL_BODY_TEMPLATE = """
-Dear {first_name},
-
-Thank you for attending {course_name}.
-
-Please find attached your Certificate of Completion.
-
-We hope you found the session valuable and look forward to seeing you at future events.
-
-Warm regards,
-{business_name}
-""".strip()
-
+# Medal image — uses a royalty-free placeholder emoji-style medal via local drawing
+# Replace with your own medal image by setting MEDAL_PATH = "assets/medal.png"
+MEDAL_PATH = None  # Set to "assets/medal.png" if you have one
 
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
 
-def validate_config():
-    """Ensure all required environment variables are loaded."""
-    missing = []
-    for name, value in [
-        ("AZURE_TENANT_ID", TENANT_ID),
-        ("AZURE_CLIENT_ID", CLIENT_ID),
-        ("AZURE_CLIENT_SECRET", CLIENT_SECRET),
-        ("SENDER_EMAIL", SENDER_EMAIL),
-        ("BUSINESS_NAME", BUSINESS_NAME),
-    ]:
-        if not value or value.startswith("your-"):
-            missing.append(name)
-    if missing:
-        print("\n✗ Missing or unconfigured .env values:")
-        for m in missing:
-            print(f"  - {m}")
-        print("\nEdit your .env file with real values before running.\n")
-        return False
-    return True
-
-
-def get_access_token():
-    """Obtain OAuth2 access token from Microsoft identity platform."""
-    authority = f"https://login.microsoftonline.com/{TENANT_ID}"
-    app = msal.ConfidentialClientApplication(
-        CLIENT_ID,
-        authority=authority,
-        client_credential=CLIENT_SECRET
-    )
-    result = app.acquire_token_for_client(scopes=GRAPH_SCOPE)
-    if "access_token" in result:
-        print("  ✓ OAuth2 token acquired")
-        return result["access_token"]
-    else:
-        error = result.get("error_description", "Unknown error")
-        raise Exception(f"Token acquisition failed: {error}")
+def draw_medal(c, x, y, size=60):
+    """Draws a simple decorative medal if no medal image is provided."""
+    # Outer circle
+    c.setFillColor(ACCENT_COLOUR)
+    c.circle(x, y, size / 2 + 8, fill=1, stroke=0)
+    # Inner circle
+    c.setFillColor(colors.HexColor("#FFD700"))
+    c.circle(x, y, size / 2, fill=1, stroke=0)
+    # Star shape (simplified)
+    c.setFillColor(ACCENT_COLOUR)
+    c.setFont("Helvetica-Bold", 28)
+    c.drawCentredString(x, y - 10, "★")
 
 
 def load_attendees(filepath):
@@ -101,153 +70,144 @@ def load_attendees(filepath):
     attendees = []
     headers = [cell.value for cell in ws[1]]
     for row in ws.iter_rows(min_row=2, values_only=True):
-        if any(row):
+        if any(row):  # Skip empty rows
             attendee = dict(zip(headers, row))
             attendees.append(attendee)
     return attendees
 
 
-def find_certificate(name, folder):
-    """Find the generated PDF for a given attendee name."""
-    safe_name = name.replace(" ", "_").replace(".", "_")
-    filename = f"{safe_name}_certificate.pdf"
-    filepath = os.path.join(folder, filename)
-    return filepath if os.path.exists(filepath) else None
-
-
-def build_email_payload(attendee, cert_path):
-    """Build the Graph API email payload with PDF attachment."""
+def generate_certificate(attendee, output_folder):
+    """Generate a single branded PDF certificate for one attendee."""
+    
+    # Extract fields — matches your Excel columns
+    email = attendee.get("email") or ""  # Optional — not required for PDF generation
     full_name = attendee.get("first.lastname", "")
     course_name = attendee.get("webinar course name", "")
-    email = attendee.get("email", "")
-
-    # First name for greeting
-    first_name = full_name.split(".")[0] if "." in full_name else full_name.split(" ")[0]
-
-    # Encode PDF as base64
-    with open(cert_path, "rb") as f:
-        pdf_base64 = base64.b64encode(f.read()).decode("utf-8")
-
-    cert_filename = os.path.basename(cert_path)
-
-    body_text = EMAIL_BODY_TEMPLATE.format(
-        first_name=first_name,
-        course_name=course_name,
-        business_name=BUSINESS_NAME
-    )
-
-    return {
-        "message": {
-            "subject": EMAIL_SUBJECT,
-            "body": {
-                "contentType": "Text",
-                "content": body_text
-            },
-            "toRecipients": [
-                {"emailAddress": {"address": email}}
-            ],
-            "attachments": [
-                {
-                    "@odata.type": "#microsoft.graph.fileAttachment",
-                    "name": cert_filename,
-                    "contentType": "application/pdf",
-                    "contentBytes": pdf_base64
-                }
-            ]
-        },
-        "saveToSentItems": "true"
-    }
-
-
-def send_email(token, attendee, cert_path):
-    """Send a single certificate email via Microsoft Graph API."""
-    payload = build_email_payload(attendee, cert_path)
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-    response = requests.post(GRAPH_ENDPOINT, headers=headers, json=payload)
-
-    if response.status_code == 202:
-        name = attendee.get("first.lastname", "")
-        email = attendee.get("email", "")
-        print(f"  ✓ Sent to: {email} ({name})")
-        return True
+    completion_date = attendee.get("date", "")
+    
+    # Format date if it's a datetime object
+    if hasattr(completion_date, 'strftime'):
+        completion_date = completion_date.strftime("%d %B %Y")
     else:
-        name = attendee.get("first.lastname", "")
-        print(f"  ✗ Failed for {name}: {response.status_code} — {response.text}")
-        return False
+        completion_date = str(completion_date)
 
+    # Safe filename from name
+    safe_name = full_name.replace(" ", "_").replace(".", "_")
+    filename = f"{safe_name}_certificate.pdf"
+    filepath = os.path.join(output_folder, filename)
 
-# ─────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────
+    # Page setup — landscape A4
+    width, height = landscape(A4)
+    c = canvas.Canvas(filepath, pagesize=landscape(A4))
+
+    # ── Background ──
+    c.setFillColor(colors.white)
+    c.rect(0, 0, width, height, fill=1, stroke=0)
+
+    # ── Decorative border ──
+    c.setStrokeColor(BRAND_COLOUR)
+    c.setLineWidth(3)
+    c.rect(15*mm, 15*mm, width - 30*mm, height - 30*mm, fill=0, stroke=1)
+    c.setStrokeColor(ACCENT_COLOUR)
+    c.setLineWidth(1)
+    c.rect(18*mm, 18*mm, width - 36*mm, height - 36*mm, fill=0, stroke=1)
+
+    # ── Logo top left ──
+    if os.path.exists(LOGO_PATH):
+        logo = ImageReader(LOGO_PATH)
+        c.drawImage(logo, 25*mm, height - 45*mm, width=45*mm, height=20*mm,
+                    preserveAspectRatio=True, mask='auto')
+
+    # ── Certificate of Completion heading ──
+    c.setFillColor(BRAND_COLOUR)
+    c.setFont("Helvetica-Bold", 32)
+    c.drawCentredString(width / 2, height - 62*mm, "Certificate of Participation")
+
+    # ── Decorative line under heading ──
+    c.setStrokeColor(ACCENT_COLOUR)
+    c.setLineWidth(2)
+    c.line(width/2 - 80*mm, height - 67*mm, width/2 + 80*mm, height - 67*mm)
+
+    # ── Medal centre ──
+    medal_y = height / 2 + 5*mm
+    if MEDAL_PATH and os.path.exists(MEDAL_PATH):
+        medal_img = ImageReader(MEDAL_PATH)
+        c.drawImage(medal_img, width/2 - 20*mm, medal_y - 20*mm,
+                    width=40*mm, height=40*mm, preserveAspectRatio=True, mask='auto')
+    else:
+        draw_medal(c, width / 2, medal_y + 10*mm, size=55)
+
+    # ── This certifies that ──
+    c.setFillColor(colors.HexColor("#555555"))
+    c.setFont("Helvetica", 14)
+    c.drawCentredString(width / 2, height / 2 - 18*mm, "This certifies that")
+
+    # ── Attendee name ──
+    c.setFillColor(BRAND_COLOUR)
+    c.setFont("Helvetica-Bold", 26)
+    c.drawCentredString(width / 2, height / 2 - 30*mm, full_name)
+
+    # ── Name underline ──
+    c.setStrokeColor(ACCENT_COLOUR)
+    c.setLineWidth(1)
+    name_width = c.stringWidth(full_name, "Helvetica-Bold", 26)
+    c.line(width/2 - name_width/2, height/2 - 32*mm,
+           width/2 + name_width/2, height/2 - 32*mm)
+
+    # ── Has completed the course ──
+    c.setFillColor(colors.HexColor("#555555"))
+    c.setFont("Helvetica", 13)
+    c.drawCentredString(width / 2, height / 2 - 42*mm, "participated in the course")
+
+    # ── Course name ──
+    c.setFillColor(BRAND_COLOUR)
+    c.setFont("Helvetica-Bold", 16)
+    c.drawCentredString(width / 2, height / 2 - 53*mm, course_name)
+
+    # ── Bottom row: completion date left, issued by right ──
+    bottom_y = 28*mm
+    c.setFillColor(colors.HexColor("#555555"))
+    c.setFont("Helvetica", 11)
+    c.drawString(25*mm, bottom_y + 5*mm, "Completion Date")
+    c.setFont("Helvetica-Bold", 12)
+    c.setFillColor(BRAND_COLOUR)
+    c.drawString(25*mm, bottom_y - 3*mm, completion_date)
+
+    c.setFillColor(colors.HexColor("#555555"))
+    c.setFont("Helvetica", 11)
+    c.drawRightString(width - 25*mm, bottom_y + 5*mm, "Issued by:")
+    c.setFont("Helvetica-Bold", 12)
+    c.setFillColor(BRAND_COLOUR)
+    c.drawRightString(width - 25*mm, bottom_y - 3*mm, BUSINESS_NAME)
+
+    c.save()
+    print(f"  ✓ Generated: {filename}")
+    return filepath, email, full_name
+
 
 def main():
-    print("\n── Certificate Sender (Microsoft Graph API) ──")
+    print("\n── Certificate Generator ──")
+    print(f"Reading attendees from: {EXCEL_FILE}")
+    print("Note: Email column is optional — skipped if not present.\n")
 
-    # Validate config
-    if not validate_config():
-        return
-
-    print(f"Sender:  {SENDER_EMAIL}")
-    print(f"Business: {BUSINESS_NAME}\n")
+    # Create output folder
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
     # Load attendees
     attendees = load_attendees(EXCEL_FILE)
-    print(f"Found {len(attendees)} attendees")
+    print(f"Found {len(attendees)} attendees\n")
 
-    # Verify all certificates exist before attempting to send
-    print("Verifying certificates...")
-    ready = []
-    missing = []
+    # Generate each certificate
+    results = []
     for attendee in attendees:
-        name = attendee.get("first.lastname", "")
-        cert = find_certificate(name, CERTIFICATES_FOLDER)
-        if cert:
-            ready.append((attendee, cert))
-        else:
-            missing.append(name)
+        try:
+            filepath, email, name = generate_certificate(attendee, OUTPUT_FOLDER)
+            results.append({"name": name, "email": email, "file": filepath})
+        except Exception as e:
+            print(f"  ✗ Error for {attendee}: {e}")
 
-    if missing:
-        print(f"\n  ✗ Missing certificates for:")
-        for name in missing:
-            print(f"    - {name}")
-        print("\nRun generate_certificates.py first. Aborting.\n")
-        return
-
-    print(f"All {len(ready)} certificates found.\n")
-
-    # Acquire OAuth2 token
-    print("Authenticating with Microsoft Graph...")
-    try:
-        token = get_access_token()
-    except Exception as e:
-        print(f"\n✗ Authentication error: {e}")
-        print("\nCheck your AZURE_TENANT_ID, AZURE_CLIENT_ID, and AZURE_CLIENT_SECRET in .env\n")
-        return
-
-    # Send emails
-    print("\nSending certificates...\n")
-    sent = 0
-    failed = []
-
-    for attendee, cert_path in ready:
-        success = send_email(token, attendee, cert_path)
-        if success:
-            sent += 1
-        else:
-            failed.append(attendee.get("first.lastname", "unknown"))
-
-    # Summary
-    print(f"\n── Complete ──")
-    print(f"  Sent:   {sent}")
-    print(f"  Failed: {len(failed)}")
-    if failed:
-        print("  Failed recipients:")
-        for name in failed:
-            print(f"    - {name}")
-    print()
+    print(f"\n── Complete: {len(results)} certificates saved to /{OUTPUT_FOLDER} ──")
+    print("Run send_certificates.py when ready to email.\n")
 
 
 if __name__ == "__main__":

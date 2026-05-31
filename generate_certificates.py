@@ -81,8 +81,8 @@ def generate_certificate(attendee, output_folder):
     
     # Extract fields — matches your Excel columns
     email = attendee.get("email", "")
-    full_name = attendee.get("first.lastname", "")
-    course_name = attendee.get("webinar course name", "")
+    full_name = attendee.get("full name", "")
+    course_name = attendee.get("course name", "")
     completion_date = attendee.get("date", "")
     
     # Format date if it's a datetime object
@@ -121,7 +121,7 @@ def generate_certificate(attendee, output_folder):
     # ── Certificate of Completion heading ──
     c.setFillColor(BRAND_COLOUR)
     c.setFont("Helvetica-Bold", 32)
-    c.drawCentredString(width / 2, height - 62*mm, "Certificate of Completion")
+    c.drawCentredString(width / 2, height - 62*mm, "Certificate of Participation")
 
     # ── Decorative line under heading ──
     c.setStrokeColor(ACCENT_COLOUR)
@@ -157,7 +157,8 @@ def generate_certificate(attendee, output_folder):
     # ── Has completed the course ──
     c.setFillColor(colors.HexColor("#555555"))
     c.setFont("Helvetica", 13)
-    c.drawCentredString(width / 2, height / 2 - 42*mm, "has completed the course")
+    c.drawCentredString(width / 2, height / 2 - 42*mm, "participated in the course")
+
 
     # ── Course name ──
     c.setFillColor(BRAND_COLOUR)

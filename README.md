@@ -2,6 +2,7 @@
 
 A two-stage Python tool to generate branded PDF certificates and email them to webinar attendees via Microsoft 365.
 
+Ensure .env files are loaded before running.
 ---
 
 ## Project Structure
