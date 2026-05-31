@@ -34,10 +34,10 @@ pip install reportlab openpyxl pillow
 ### 2. Prepare your attendees.xlsx
 Create an Excel file with these exact column headers in row 1:
 
-| email | first.lastname | webinar course name | date |
+| email | full name | course name | date |
 |-------|---------------|--------------------|----|
-| jane.smith@email.com | Jane.Smith | Trauma-Informed Leadership | 2026-03-22 |
-| john.doe@email.com | John.Doe | Trauma-Informed Leadership | 2026-03-22 |
+| jane.smith@email.com | Jane Smith | Dummy Leadership Course | 2026-03-22 |
+| john.doe@email.com | John Doe | Dummy Leadership Course | 2026-03-22 |
 
 ### 3. Add your logo
 Place your logo file at: `assets/logo.png`
